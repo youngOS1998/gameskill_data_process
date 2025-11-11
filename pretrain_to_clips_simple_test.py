@@ -5,9 +5,11 @@ import tqdm
 import os
 import subprocess
 from pathlib import Path
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 def get_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='测试版本：只处理少量视频片段')
     parser.add_argument('--inputs', type=str, default='fp_processed.jsonl')
     parser.add_argument('--part', type=str, default='1/1')
     parser.add_argument('--min_clip_sec', type=int, default=5)
@@ -15,11 +17,16 @@ def get_args():
     parser.add_argument('--max_empty_sec', type=int, default=2)
     parser.add_argument('--min_wps', type=int, default=1)
     parser.add_argument('--max_wps', type=int, default=4)
-    parser.add_argument('--output', type=str, default='live_cc_train.jsonl')
+    parser.add_argument('--output', type=str, default='gameskill_1_train.jsonl')
     parser.add_argument('--video_dir', type=str, default='processed_bilibili_cs2')
-    parser.add_argument('--output_video_dir', type=str, default='videos')
-    parser.add_argument('--data_path', type=str, default='', help='视频文件的绝对路径，如果为空则使用当前工作目录')
+    parser.add_argument('--output_video_dir', type=str, default='videos_gameskill_1')
+    parser.add_argument('--data_path', type=str, default='/root/autodl-tmp/Projects/qwen_gameskill/qwen-vl-finetune/dataset', help='视频文件的绝对路径，如果为空则使用当前工作目录')
     parser.add_argument('--skip_video_cut', action='store_true', help='跳过视频切割，只生成数据文件')
+    parser.add_argument('--num_workers', type=int, default=6, help='并行处理的工作进程数，0表示使用CPU核心数')
+    parser.add_argument('--ffmpeg_preset', type=str, default='veryfast', help='ffmpeg编码预设：ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow')
+    # 测试参数
+    parser.add_argument('--max_videos', type=int, default=10000, help='最多处理多少个视频（测试用）')
+    parser.add_argument('--max_clips_per_video', type=int, default=10000, help='每个视频最多生成多少个片段（测试用）')
     return parser.parse_args()
 
 def split2words(datum: dict):
@@ -83,6 +90,10 @@ def process(datum: dict, args):
     datum = split2words(datum)
     clips_datum = clip4pretrain(datum, args)
     clips_datum = [clip_datum for clip_datum in clips_datum if check(clip_datum, args)]
+    # 测试版本：限制每个视频的片段数量
+    if len(clips_datum) > args.max_clips_per_video:
+        clips_datum = clips_datum[:args.max_clips_per_video]
+        print(f"  测试模式：视频 {datum['video']} 限制为 {args.max_clips_per_video} 个片段")
     return clips_datum
 
 def simple_mt(items, func, desc='Processing'):
@@ -113,45 +124,73 @@ def check_ffmpeg_available() -> bool:
     except FileNotFoundError:
         return False
 
-def cut_video(input_video: str, output_video: str, start_time: float, end_time: float) -> bool:
-    """使用ffmpeg切割视频"""
+def cut_video(input_video: str, output_video: str, start_time: float, end_time: float, preset: str = 'veryfast') -> bool:
+    """使用ffmpeg切割视频，使用兼容的编码格式以确保Decord可以读取"""
     # 检查ffmpeg是否可用
     if not check_ffmpeg_available():
-        print(f"警告: ffmpeg 未安装，跳过视频切割: {input_video}")
         return False
     
     try:
         duration = end_time - start_time
+        # 直接使用重新编码模式，确保兼容性
+        # 使用 yuv420p 像素格式，这是最兼容的格式，Decord 可以正确读取
+        # 使用更快的preset来加速编码
         cmd = [
             'ffmpeg', '-i', input_video,
             '-ss', str(start_time),
             '-t', str(duration),
-            '-c', 'copy',  # 使用copy模式，速度快
+            '-c:v', 'libx264',           # 视频编码器
+            '-preset', preset,          # 编码速度预设（veryfast比medium快很多）
+            '-crf', '23',                # 质量控制（18-28，23是默认值）
+            '-pix_fmt', 'yuv420p',       # 像素格式，确保兼容性
+            '-movflags', '+faststart',   # 优化网络播放
+            '-c:a', 'aac',               # 音频编码器
+            '-b:a', '128k',              # 音频比特率
+            '-threads', '1',              # 每个进程使用1个线程，避免多进程冲突
             '-avoid_negative_ts', 'make_zero',
-            '-y',  # 覆盖输出文件
+            '-y',                        # 覆盖输出文件
+            '-loglevel', 'error',        # 减少日志输出
             output_video
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            # 如果copy模式失败，尝试重新编码
-            cmd = [
-                'ffmpeg', '-i', input_video,
-                '-ss', str(start_time),
-                '-t', str(duration),
-                '-c:v', 'libx264',
-                '-c:a', 'aac',
-                '-avoid_negative_ts', 'make_zero',
-                '-y',
-                output_video
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if result.returncode != 0:
-                print(f"警告: 视频切割失败 {input_video}: {result.stderr}")
-                return False
+            return False
         return True
     except Exception as e:
-        print(f"警告: 视频切割异常 {input_video}: {e}")
         return False
+
+def process_single_clip(args_tuple):
+    """处理单个clip的辅助函数，用于多进程"""
+    clip_datum, args = args_tuple
+    try:
+        # 转换为live_cc格式
+        live_cc_data, video_filename, start_time, end_time = convert_to_live_cc_format(clip_datum, args)
+        
+        # 切割视频（如果未跳过）
+        video_cut_success = False
+        if not args.skip_video_cut:
+            video_id = clip_datum['video']
+            input_video_path = os.path.join(args.video_dir, f"{video_id}.mp4")
+            output_video_path = os.path.join(args.output_video_dir, video_filename)
+            
+            if os.path.exists(input_video_path):
+                video_cut_success = cut_video(input_video_path, output_video_path, start_time, end_time, args.ffmpeg_preset)
+        
+        return {
+            'success': True,
+            'live_cc_data': live_cc_data,
+            'video_cut_success': video_cut_success,
+            'video_id': clip_datum.get('video', ''),
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'live_cc_data': None,
+            'video_cut_success': False,
+            'video_id': clip_datum.get('video', ''),
+            'error': str(e)
+        }
 
 def convert_to_live_cc_format(clip_datum: dict, args) -> tuple:
     """将clip数据转换为live_cc_train.jsonl格式"""
@@ -168,7 +207,8 @@ def convert_to_live_cc_format(clip_datum: dict, args) -> tuple:
     
     # 生成视频文件名
     video_filename = generate_video_filename(video_id, start_time, end_time)
-    video_path = f"videos/{video_filename}"
+    # 使用 args.output_video_dir 确保路径一致
+    video_path = f"{args.output_video_dir}/{video_filename}"
     
     # 构建之前的解说内容（用于human提示）
     previous_text = previous if previous else "..."
@@ -225,6 +265,12 @@ if __name__ == '__main__':
     if not args.data_path:
         args.data_path = os.path.abspath(args.output_video_dir)
 
+    print('=' * 60)
+    print('测试模式：只处理少量视频片段')
+    print(f'最多处理视频数: {args.max_videos}')
+    print(f'每个视频最多片段数: {args.max_clips_per_video}')
+    print('=' * 60)
+
     print(f'正在读取 {args.inputs}...')
     with open(args.inputs, 'r', encoding='utf-8') as f:
         lines = f.readlines()
@@ -246,6 +292,11 @@ if __name__ == '__main__':
     datums = datums[index-1::total]
     print(f'当前分片处理 {len(datums)} 条记录 (分片 {index}/{total})')
     
+    # 测试版本：限制处理的视频数量
+    if len(datums) > args.max_videos:
+        datums = datums[:args.max_videos]
+        print(f'测试模式：限制为前 {args.max_videos} 个视频')
+    
     print('正在处理数据...')
     clips_datums = simple_mt(datums, functools.partial(process, args=args), '处理视频数据')
     
@@ -260,48 +311,97 @@ if __name__ == '__main__':
         print("提示: 可以运行 'apt install -y ffmpeg' 安装 ffmpeg，或使用 --skip_video_cut 参数明确跳过视频切割")
         args.skip_video_cut = True
     
+    # 准备所有需要处理的clip
+    all_clips = []
+    for clips_datum in clips_datums:
+        if clips_datum:
+            for clip_datum in clips_datum:
+                all_clips.append((clip_datum, args))
+    
+    print(f'共需要处理 {len(all_clips)} 个视频片段')
     print(f'正在转换格式{"并切割视频" if not args.skip_video_cut else "（跳过视频切割）"}...')
+    
+    # 确定并行工作进程数
+    if args.num_workers == 0:
+        num_workers = max(1, cpu_count() - 1)  # 保留一个核心
+    else:
+        num_workers = args.num_workers
+    
+    if not args.skip_video_cut:
+        print(f'使用 {num_workers} 个并行进程处理视频切割')
+        print(f'ffmpeg编码预设: {args.ffmpeg_preset}')
+    
     total_clips = 0
     video_cut_success = 0
     video_cut_failed = 0
+    processed_videos = set()  # 记录已处理的视频
     
+    # 使用多进程处理
+    if not args.skip_video_cut and num_workers > 1:
+        with Pool(processes=num_workers) as pool:
+            results = list(tqdm.tqdm(
+                pool.imap(process_single_clip, all_clips),
+                total=len(all_clips),
+                desc='转换格式和切割视频'
+            ))
+    else:
+        # 单进程模式
+        results = []
+        for clip_tuple in tqdm.tqdm(all_clips, desc='转换格式和切割视频'):
+            results.append(process_single_clip(clip_tuple))
+    
+    # 保存结果
     with open(args.output, 'w', encoding='utf-8') as f:
-        for clips_datum in tqdm.tqdm(clips_datums, desc='转换格式和切割视频'):
-            if clips_datum:
-                for clip_datum in clips_datum:
-                    try:
-                        # 转换为live_cc格式
-                        live_cc_data, video_filename, start_time, end_time = convert_to_live_cc_format(clip_datum, args)
-                        
-                        # 切割视频（如果未跳过）
-                        if not args.skip_video_cut:
-                            video_id = clip_datum['video']
-                            input_video_path = os.path.join(args.video_dir, f"{video_id}.mp4")
-                            output_video_path = os.path.join(args.output_video_dir, video_filename)
-                            
-                            if os.path.exists(input_video_path):
-                                if cut_video(input_video_path, output_video_path, start_time, end_time):
-                                    video_cut_success += 1
-                                else:
-                                    video_cut_failed += 1
-                                    # 即使视频切割失败，也保存数据（可能视频文件有问题）
-                            else:
-                                print(f"警告: 源视频文件不存在: {input_video_path}")
-                                video_cut_failed += 1
-                        
-                        # 保存数据
-                        f.write(json.dumps(live_cc_data, ensure_ascii=False) + '\n')
-                        total_clips += 1
-                    except Exception as e:
-                        print(f"处理clip时出错: {e}")
-                        continue
+        for result in results:
+            if result['success']:
+                if result['live_cc_data']:
+                    f.write(json.dumps(result['live_cc_data'], ensure_ascii=False) + '\n')
+                    total_clips += 1
+                    if result['video_cut_success']:
+                        video_cut_success += 1
+                        if result['video_id']:
+                            processed_videos.add(result['video_id'])
+                    else:
+                        video_cut_failed += 1
+            else:
+                if result['error']:
+                    print(f"处理clip时出错: {result['error']}")
+                video_cut_failed += 1
     
+    print('=' * 60)
     print(f'处理完成！')
     print(f'共生成 {total_clips} 个视频片段')
     if not args.skip_video_cut:
         print(f'视频切割成功: {video_cut_success} 个')
         print(f'视频切割失败: {video_cut_failed} 个')
+        print(f'处理的视频数: {len(processed_videos)} 个')
         print(f'输出视频目录: {args.output_video_dir}')
+        
+        # 验证文件是否存在
+        print('\n验证生成的文件...')
+        missing_files = 0
+        with open(args.output, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                try:
+                    data = json.loads(line.strip())
+                    video_path = data.get('video', '')
+                    if video_path:
+                        # 提取文件名
+                        video_filename = os.path.basename(video_path)
+                        full_path = os.path.join(args.output_video_dir, video_filename)
+                        if not os.path.exists(full_path):
+                            missing_files += 1
+                            if missing_files <= 5:  # 只显示前5个缺失的文件
+                                print(f"  警告: 文件不存在 - {video_filename}")
+                except:
+                    continue
+        
+        if missing_files == 0:
+            print(f'✓ 所有 {total_clips} 个视频文件都已成功生成！')
+        else:
+            print(f'✗ 有 {missing_files} 个视频文件缺失')
     else:
         print(f'已跳过视频切割（使用 --skip_video_cut 或 ffmpeg 未安装）')
     print(f'输出文件: {args.output}')
+    print('=' * 60)
+
