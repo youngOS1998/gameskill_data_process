@@ -1,0 +1,18 @@
+# 视频描述生成工具依赖
+# 使用 Qwen3-VL-8B / Qwen2-VL-8B 进行视频描述
+
+# 核心依赖
+torch>=2.0.0
+transformers>=4.37.0
+pillow>=9.0.0
+opencv-python>=4.8.0
+tqdm>=4.65.0
+
+# 可选依赖（用于更精确的视频处理）
+moviepy>=1.0.3
+
+# 如果需要使用 accelerate 进行模型加速
+accelerate>=0.20.0
+
+
+

@@ -84,8 +84,8 @@ def check(datum: dict, args):
     if duration <= 0:
         return False
     wps = len(subtitles) / duration
-    if wps < args.min_wps or wps > args.max_wps:
-        return False
+    # if wps < args.min_wps or wps > args.max_wps:
+    #     return False
     return True
 
 def process(datum: dict, args):
