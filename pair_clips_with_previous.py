@@ -25,19 +25,19 @@ def get_args():
     parser.add_argument(
         '--input_file',
         type=str,
-        default='clips_final_standard.json',
+        default='clips_final_standard_all.json',
         help='已处理的片段描述文件（支持JSON数组格式或JSONL格式）'
     )
     parser.add_argument(
         '--clips_dir',
         type=str,
-        default='video_clips_6_15s',
+        default='/root/autodl-tmp/Projects/Qwen3-VL/qwen-vl-finetune/dataset/video_clips_6_15s',
         help='视频片段目录'
     )
     parser.add_argument(
         '--output_file',
         type=str,
-        default='clip_pairs.jsonl',
+        default='clip_pairs_all.jsonl',
         help='输出的数据对文件（JSONL格式）'
     )
     parser.add_argument(

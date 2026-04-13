@@ -46,13 +46,13 @@ def get_args():
     parser.add_argument(
         '--input_file',
         type=str,
-        default='clip_pairs_test.jsonl',
+        default='clip_pairs_all.jsonl',
         help='输入的 clip_pairs 文件（JSONL格式）'
     )
     parser.add_argument(
         '--output_file',
         type=str,
-        default='gameskill_train.jsonl',
+        default='gameskill_train_all.jsonl',
         help='输出的训练数据文件（JSONL格式）'
     )
     parser.add_argument(
@@ -175,12 +175,13 @@ def convert_pair_to_training_format(
     title = f"{video_id}_" if video_id else ""
     
     # 构建 human 提示词
-    instruction = "请观看这个游戏视频片段，并给出专业的游戏解说和分析，包括战术策略、操作技巧和关键决策。"
+    instruction = "详细描述视频内容，并给出专业的游戏解说和分析，包括战术策略、操作技巧和关键决策。"
     
-    human_value = f"<video>\n视频标题: {title}\n类别: {category}"
+    # human_value = f"<video>\n视频标题: {title}\n类别: {category}"
+    human_value = f"<video>\n这是cs2的游戏画面，你现在是我的游戏AI助手，请给我一些指导建议"
     if previous_description and previous_description != "...":
-        human_value += f"\n之前的解说内容: {previous_description}"
-    human_value += f"\n请观看视频并给出解说: {instruction}"
+        human_value += f"\n上一个连续视频片段的建议内容: {previous_description}"
+    human_value += f"\n请观看这个游戏视频片段: {instruction}"
     
     # 构建对话
     conversations = [

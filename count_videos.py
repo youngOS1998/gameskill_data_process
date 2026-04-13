@@ -44,7 +44,8 @@ def count_videos(folder_path):
 
 def main():
     # 默认统计当前目录下的 processed_bilibili_cs2 文件夹
-    folder_path = './processed_bilibili_cs2'
+    # folder_path = './processed_bilibili_cs2'
+    folder_path = '/root/autodl-tmp/Projects/Qwen3-VL/qwen-vl-finetune/dataset/video_clips_6_15s'
     
     count, video_files = count_videos(folder_path)
     

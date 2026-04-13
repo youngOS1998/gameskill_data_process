@@ -1,6 +1,6 @@
-# 游戏视频描述生成工具
+# 游戏视频处理步骤
 
-使用 Qwen3-VL-8B（或 Qwen2-VL-8B）模型对游戏视频进行描述，生成玩家操作描述，用于微调 4B 模型作为游戏 AI 助手。
+用Qwen3-VL-32B的大模型对游戏画面进行描述之后，形成一个描述性的数据集，然后对这个数据集进行一些列处理，最终形成游戏AI助手的训练数据
 
 ## 功能特点
 
@@ -11,17 +11,10 @@
 
 ## 环境要求
 
-### 1. Python 环境
-- Python 3.8 或更高版本
-
-### 2. 安装依赖
+### 1. 处理步骤
 
 ```bash
-pip install torch torchvision torchaudio
-pip install transformers>=4.37.0
-pip install pillow opencv-python
-pip install tqdm
-pip install moviepy  # 可选，用于更精确的视频处理
+python pair_clips_with_previous.py   # 跟前一段视频形成数据对
 ```
 
 ### 3. 硬件要求
